@@ -86,3 +86,5 @@ print("变量写入完成")
 
 print("SPACE_URL=https://%s-aycho-gateway.hf.space" % OWNER.replace("_", "-").replace(".", "-"))
 print("SPACE_PAGE=https://huggingface.co/spaces/%s" % REPO_ID)
+
+# re-deploy trigger: 2026-10-04 18:57:02
