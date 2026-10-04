@@ -1,0 +1,58 @@
+name: AYCHO Mail Relay
+
+# 由后端网关通过 repository_dispatch 触发：GitHub runner 直连 SMTP 真实投递
+# 适用场景：服务器所在网络封锁 SMTP 出站端口（如 Render 免费实例 25/465/587）
+on:
+  repository_dispatch:
+    types: [aycho-mail]
+
+run-name: AYCHO Mail ${{ github.event.client_payload.rid }}
+
+permissions:
+  contents: read
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Send email via SMTP
+        env:
+          SMTP_HOST: smtp.qq.com
+          SMTP_PORT: "465"
+          SMTP_USER: ${{ secrets.AYCHO_SMTP_USER }}
+          SMTP_PASS: ${{ secrets.AYCHO_SMTP_PASS }}
+          MAIL_FROM: ${{ secrets.AYCHO_MAIL_FROM }}
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, smtplib, ssl, sys
+          from email.message import EmailMessage
+
+          payload = json.loads(os.environ.get("PAYLOAD") or "{}")
+          to = (payload.get("to") or "").strip()
+          subject = payload.get("subject") or "AYCHO"
+          text = base64.b64decode(payload.get("text_b64") or "").decode("utf-8", "replace")
+          html = ""
+          if payload.get("html_b64"):
+              html = base64.b64decode(payload["html_b64"]).decode("utf-8", "replace")
+          if not to:
+              print("ERROR: 缺少收件人")
+              sys.exit(1)
+
+          msg = EmailMessage()
+          msg["From"] = "%s <%s>" % (payload.get("from_name") or "AYCHO", os.environ["MAIL_FROM"])
+          msg["To"] = to
+          msg["Subject"] = subject
+          msg.set_content(text or "")
+          if html:
+              msg.add_alternative(html, subtype="html")
+
+          ctx = ssl.create_default_context()
+          with smtplib.SMTP_SSL(os.environ.get("SMTP_HOST", "smtp.qq.com"),
+                                int(os.environ.get("SMTP_PORT", "465")),
+                                context=ctx, timeout=30) as s:
+              s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASS"])
+              s.send_message(msg)
+          print("SENT ->", to)
+          PY
