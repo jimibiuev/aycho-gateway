@@ -1,0 +1,257 @@
+/* AYCHO module: server/lib/share | 真实分享（服务端存储 + 公网可访问的 HTML 页）
+ * 分享内容落盘到 server/data/shares/<id>.json，公开链接形如：
+ *   https://<分享域名>/artifact/<ID>      ← 打开即 HTML 页面（与 traecontent 形态一致）
+ *   <origin>/s/<ID>                       ← 带 AYCHO 外壳的只读查看页
+ * 任何设备/浏览器打开都能取到内容（不是只存 localStorage 的假链接）。
+ * 路由：
+ *   POST   /api/share          建分享 {name,mime,content|contentB64,artifactId}
+ *   GET    /api/share/:id      取分享 JSON
+ *   DELETE /api/share/:id      停止分享（撤销，归属校验）
+ *   GET    /api/shares         列出本账号的分享（需 Bearer）
+ *   GET    /artifact/:id       公开 HTML 分享页（裸内容直出 / 非 HTML 走只读壳）
+ *   GET    /s/:id              公开只读查看页（带 AYCHO 外壳）
+ */
+'use strict';
+
+const crypto = require('crypto');
+const db = require('./db');
+const { sendJson, sendText, readJson, bearer } = require('./http');
+
+/* ID 形如 JO7AKSWM_HLPXJ：8 位大写 + 下划线 + 6 位大写（base32 字符集，去掉易混字符） */
+const ID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+function randChars(n) {
+  const buf = crypto.randomBytes(n);
+  let out = '';
+  for (let i = 0; i < n; i++) out += ID_ALPHABET.charAt(buf[i] % ID_ALPHABET.length);
+  return out;
+}
+
+function newId() {
+  return randChars(8) + '_' + randChars(6);
+}
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/* 请求来源（用于 /s/ 查看页、JSON 返回） */
+function baseOf(req) {
+  const env = String(process.env.AYCHO_PUBLIC_BASE || '').trim().replace(/\/+$/, '');
+  if (env) return env;
+  const proto = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || (req.socket && req.socket.encrypted ? 'https' : 'http');
+  const host = req.headers['x-forwarded-host'] || req.headers['host'] || 'localhost';
+  return proto + '://' + host;
+}
+
+/* 分享链接专用前缀：优先 AYCHO_SHARE_BASE（独立分享域名），否则回落到请求来源 */
+function linkBase(req) {
+  const env = String(process.env.AYCHO_SHARE_BASE || '').trim().replace(/\/+$/, '');
+  return env || baseOf(req);
+}
+
+function linkOf(req, id) {
+  return linkBase(req) + '/artifact/' + id;
+}
+
+function isTextual(mime, name) {
+  const m = String(mime || '');
+  if (/^text\//.test(m)) return true;
+  if (/json|javascript|xml|svg|markdown|yaml|csv/.test(m)) return true;
+  if (/\.(md|txt|json|js|mjs|ts|css|html?|svg|csv|log|yml|yaml|xml|py|sh)$/i.test(String(name || ''))) return true;
+  return false;
+}
+
+function isHtmlShare(share) {
+  const m = String(share.mime || '');
+  const n = String(share.name || '');
+  return /html/i.test(m) || /\.html?$/i.test(n);
+}
+
+/* 把分享内容渲染成一个自包含的只读页面 */
+function viewerHtml(share, base) {
+  const name = esc(share.name || 'AYCHO 分享');
+  const mime = String(share.mime || '');
+  const content = share.content == null ? '' : String(share.content);
+  let inner;
+  if (/^image\//.test(mime)) {
+    const src = /^data:/.test(content) ? content : ('data:' + (mime || 'image/png') + ';base64,' + content);
+    inner = '<div class="ay-wrap"><img class="ay-img" alt="' + name + '" src="' + esc(src) + '"></div>';
+  } else if (isHtmlShare(share)) {
+    inner = '<iframe class="ay-frame" sandbox="allow-scripts allow-forms allow-popups" srcdoc="' + esc(content) + '"></iframe>';
+  } else if (isTextual(mime, share.name)) {
+    inner = '<pre class="ay-pre">' + esc(content) + '</pre>';
+  } else {
+    const href = '/api/share/' + encodeURIComponent(share.id || share.slug) + '?raw=1';
+    inner = '<div class="ay-wrap"><p class="ay-muted">该类型不支持在线预览。</p><a class="ay-btn" href="' + href + '" download="' + name + '">下载 ' + name + '</a></div>';
+  }
+  return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<title>' + name + ' · AYCHO</title>' +
+    '<style>' +
+    ':root{color-scheme:dark}' +
+    '*{box-sizing:border-box}body{margin:0;background:#0b0d12;color:#e7eaf3;font:14px/1.6 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}' +
+    '.ay-top{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid rgba(255,255,255,.08);position:sticky;top:0;background:rgba(11,13,18,.86);backdrop-filter:blur(10px)}' +
+    '.ay-logo{width:22px;height:22px;border-radius:7px;background:linear-gradient(135deg,#5b7cfa,#9a6bff)}' +
+    '.ay-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+    '.ay-badge{margin-left:auto;font-size:12px;color:#8b93a7;border:1px solid rgba(255,255,255,.12);border-radius:999px;padding:2px 10px}' +
+    '.ay-body{padding:18px;max-width:1100px;margin:0 auto}' +
+    '.ay-pre{margin:0;padding:16px;background:#12141c;border:1px solid rgba(255,255,255,.08);border-radius:14px;overflow:auto;white-space:pre-wrap;word-break:break-word;font:13px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}' +
+    '.ay-wrap{display:flex;flex-direction:column;align-items:center;gap:14px}' +
+    '.ay-img{max-width:100%;border-radius:14px;border:1px solid rgba(255,255,255,.08)}' +
+    '.ay-frame{width:100%;height:72vh;border:1px solid rgba(255,255,255,.08);border-radius:14px;background:#fff}' +
+    '.ay-muted{color:#8b93a7}' +
+    '.ay-btn{display:inline-block;padding:9px 16px;border-radius:10px;background:#4c6ef5;color:#fff;text-decoration:none}' +
+    '.ay-foot{color:#6d7488;font-size:12px;text-align:center;padding:18px}' +
+    '</style></head><body>' +
+    '<div class="ay-top"><div class="ay-logo"></div><div class="ay-name">' + name + '</div><span class="ay-badge">AYCHO 分享</span></div>' +
+    '<div class="ay-body">' + inner + '</div>' +
+    '<div class="ay-foot">由 AYCHO 生成 · ' + esc(new Date(share.createdAt || Date.now()).toLocaleString('zh-CN')) + ' · ' + esc(base) + '</div>' +
+    '</body></html>';
+}
+
+/* HTML 分享：内容直出（链接本身就是那个 HTML 页面），仅追加一个可关闭的 AYCHO 角标 */
+function artifactHtml(share, id, base) {
+  const html = share.content == null ? '' : String(share.content);
+  const badge = '<div id="aycho-badge" style="position:fixed;right:14px;bottom:14px;z-index:2147483646;display:flex;align-items:center;gap:8px;padding:7px 12px;border-radius:999px;background:rgba(11,13,18,.82);border:1px solid rgba(255,255,255,.14);color:#e7eaf3;font:12px/1.4 -apple-system,\'Segoe UI\',Roboto,\'PingFang SC\',sans-serif;backdrop-filter:blur(8px);box-shadow:0 6px 20px rgba(0,0,0,.35)">' +
+    '<span style="width:14px;height:14px;border-radius:5px;background:linear-gradient(135deg,#5b7cfa,#9a6bff)"></span>' +
+    '<span>AYCHO 分享 · ' + esc(share.name || id) + '</span>' +
+    '<a href="#" onclick="var b=document.getElementById(\'aycho-badge\');if(b)b.remove();return false" style="color:#8b93a7;text-decoration:none">关闭</a></div>';
+  const body = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, badge + '</body>') : (html + badge);
+  return body;
+}
+
+/* ------------------------------ 路由处理 ------------------------------ */
+async function create(req, res) {
+  const body = await readJson(req);
+  const user = db.userByToken(bearer(req));
+  let content = body.content;
+  if (content == null && body.contentB64 != null) {
+    // 保留二进制原文（data URL 或纯 base64）
+    content = /^data:/.test(String(body.contentB64))
+      ? String(body.contentB64)
+      : ('data:' + (body.mime || 'application/octet-stream') + ';base64,' + String(body.contentB64));
+  }
+  if (content == null) return sendJson(res, 400, { ok: false, message: '缺少 content / contentB64' });
+
+  const id = newId();
+  const rec = {
+    id: id,
+    slug: id,                     // 兼容旧字段名
+    name: String(body.name || '未命名文件'),
+    mime: String(body.mime || 'text/plain'),
+    artifactId: body.artifactId ? String(body.artifactId) : '',
+    size: Buffer.byteLength(String(content), 'utf8'),
+    ownerUserId: user ? user.id : '',
+    ownerEmail: user ? user.email : '',
+    createdAt: Date.now(),
+    revoked: false
+  };
+  db.writeShareBlob(id, { meta: rec, content: String(content) });
+  const d = db.load();
+  d.shares.push(rec);
+  db.save();
+  const link = linkOf(req, id);
+  console.log('[share] 新建分享 ' + id + ' → ' + rec.name + '（' + rec.size + 'B） ' + link);
+  return sendJson(res, 200, { ok: true, id: id, slug: id, url: link, name: rec.name, mime: rec.mime, createdAt: rec.createdAt });
+}
+
+function findMeta(id) {
+  const d = db.load();
+  const key = String(id || '');
+  return d.shares.find((s) => s && (s.id === key || s.slug === key)) || null;
+}
+
+function get(req, res, q) {
+  const meta = findMeta(q.slug || q.id);
+  if (!meta || meta.revoked) return sendJson(res, 404, { ok: false, message: '分享不存在或已停止' });
+  const blob = db.readShareBlob(meta.id || meta.slug);
+  if (!blob) return sendJson(res, 404, { ok: false, message: '分享内容已丢失' });
+  if (q.raw === '1') {
+    const isData = /^data:/.test(String(blob.content));
+    if (isData) {
+      const mm = /^data:([^;,]*)(;base64)?,/.exec(blob.content);
+      const b64 = mm && mm[2] ? blob.content.slice(mm[0].length) : '';
+      const buf = b64 ? Buffer.from(b64, 'base64') : Buffer.from(decodeURIComponent(blob.content.slice(mm ? mm[0].length : 0)), 'utf8');
+      res.writeHead(200, { 'Content-Type': (mm && mm[1]) || 'application/octet-stream', 'Cache-Control': 'no-store' });
+      res.end(buf);
+      return;
+    }
+    sendText(res, 200, String(blob.content), meta.mime || 'text/plain; charset=utf-8');
+    return;
+  }
+  return sendJson(res, 200, {
+    ok: true, id: meta.id || meta.slug, slug: meta.id || meta.slug,
+    name: meta.name, mime: meta.mime, size: meta.size,
+    createdAt: meta.createdAt, url: linkOf(req, meta.id || meta.slug), content: blob.content
+  });
+}
+
+/* 公开分享页：/artifact/<ID>
+ * - HTML 内容：直出（链接本身就是一个 HTML 页面）
+ * - 其它类型：走只读壳（文字/代码/图片/下载）
+ * 加 ?shell=1 可强制走壳；?raw=1 直出原始字节（html 也是原文，不含角标） */
+function artifact(req, res, q) {
+  const id = String(q.id || q.slug || '');
+  const meta = findMeta(id);
+  if (!meta || meta.revoked) {
+    return sendText(res, 404, '<!doctype html><meta charset="utf-8"><title>分享不存在</title><p style="font-family:system-ui;color:#8b93a7;text-align:center;margin-top:20vh">分享不存在或已停止。</p>', 'text/html; charset=utf-8');
+  }
+  const blob = db.readShareBlob(meta.id || meta.slug);
+  if (!blob) return sendText(res, 404, '<!doctype html><meta charset="utf-8"><p>分享内容已丢失。</p>', 'text/html; charset=utf-8');
+  const share = { id: meta.id || meta.slug, slug: meta.id || meta.slug, name: meta.name, mime: meta.mime, createdAt: meta.createdAt, content: blob.content };
+  const wantShell = q.shell === '1';
+  if (!wantShell && isHtmlShare(share)) {
+    // 真 HTML 页：原样返回，附带 AYCHO 角标
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'public, max-age=60',
+      'X-Content-Type-Options': 'nosniff'
+    });
+    res.end(artifactHtml(share, share.id, baseOf(req)));
+    console.log('[share] 访问 ' + share.id);
+    return;
+  }
+  return sendText(res, 200, viewerHtml(share, baseOf(req)), 'text/html; charset=utf-8');
+}
+
+function view(req, res, q) {
+  const meta = findMeta(q.slug || q.id);
+  if (!meta || meta.revoked) return sendText(res, 404, '<!doctype html><meta charset="utf-8"><p style="font-family:sans-serif;color:#888;text-align:center;margin-top:20vh">分享不存在或已停止。</p>', 'text/html; charset=utf-8');
+  const blob = db.readShareBlob(meta.id || meta.slug);
+  if (!blob) return sendText(res, 404, '<!doctype html><meta charset="utf-8"><p>分享内容已丢失。</p>', 'text/html; charset=utf-8');
+  return sendText(res, 200, viewerHtml({ id: meta.id || meta.slug, slug: meta.id || meta.slug, name: meta.name, mime: meta.mime, createdAt: meta.createdAt, content: blob.content }, baseOf(req)), 'text/html; charset=utf-8');
+}
+
+function stop(req, res, q) {
+  const key = String(q.slug || q.id || '');
+  const user = db.userByToken(bearer(req));
+  const d = db.load();
+  const i = d.shares.findIndex((s) => s && (s.id === key || s.slug === key));
+  if (i < 0) return sendJson(res, 404, { ok: false, message: '分享不存在' });
+  /* 归属校验：有归属的分享只有创建者（或管理员令牌）能停 */
+  const owner = d.shares[i].ownerUserId;
+  const admin = String(process.env.AYCHO_ADMIN_TOKEN || '');
+  const tok = bearer(req);
+  if (owner && (!user || user.id !== owner) && !(admin && tok === admin)) {
+    return sendJson(res, 403, { ok: false, message: '无权停止他人的分享' });
+  }
+  d.shares[i].revoked = true;
+  db.save();
+  db.removeShareBlob(d.shares[i].id || d.shares[i].slug);
+  console.log('[share] 停止分享 ' + key);
+  return sendJson(res, 200, { ok: true });
+}
+
+function list(req, res) {
+  const user = db.userByToken(bearer(req));
+  const d = db.load();
+  const items = d.shares
+    .filter((s) => s && !s.revoked && (!user || !s.ownerUserId || s.ownerUserId === user.id))
+    .map((s) => ({ id: s.id || s.slug, slug: s.id || s.slug, name: s.name, mime: s.mime, size: s.size, createdAt: s.createdAt, url: linkOf(req, s.id || s.slug) }));
+  return sendJson(res, 200, { ok: true, items: items });
+}
+
+module.exports = { create: create, get: get, view: view, artifact: artifact, stop: stop, list: list };
