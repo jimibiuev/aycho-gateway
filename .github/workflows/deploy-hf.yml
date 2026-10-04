@@ -1,0 +1,33 @@
+name: Deploy to Hugging Face Space
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "hf-deploy/**"
+      - ".github/workflows/deploy-hf.yml"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install --quiet huggingface_hub
+
+      - name: Deploy to HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          AYCHO_MODEL_API_KEY: ${{ secrets.AYCHO_MODEL_API_KEY }}
+          AYCHO_SMTP_PASS: ${{ secrets.AYCHO_SMTP_PASS }}
+          AYCHO_SMTP_USER: ${{ secrets.AYCHO_SMTP_USER }}
+          AYCHO_MODEL_BASE_URL: ${{ secrets.AYCHO_MODEL_BASE_URL }}
+          AYCHO_MODEL_NAME: ${{ secrets.AYCHO_MODEL_NAME }}
+          AYCHO_MAIL_FROM: ${{ secrets.AYCHO_MAIL_FROM }}
+        run: python hf-deploy/deploy_hf.py
