@@ -78,6 +78,7 @@ function send(res, code, body, type) {
 function serveStatic(req, res) {
   let p = decodeURIComponent(url.parse(req.url).pathname || '/');
   if (p === '/' || p === '') p = '/index.html';
+  else if (p.charAt(p.length - 1) === '/') p += 'index.html';   // 子目录直达：/login/ → /login/index.html
   const target = path.join(STATIC_DIR, p);
   // 防目录穿越
   if (!target.startsWith(STATIC_DIR)) { send(res, 403, 'Forbidden'); return; }
@@ -306,6 +307,7 @@ function ensureJavaRuntime() {
 ensureJavaRuntime();
 
 /* ------------------------------------------------------------------ 启动 */
+function startServer() {
 server.listen(PORT, HOST, () => {
   const modelReady = !!(process.env.AYCHO_MODEL_BASE_URL && process.env.AYCHO_MODEL_API_KEY);
   const mailReady = require('./lib/mailer').configured();
@@ -327,6 +329,21 @@ server.listen(PORT, HOST, () => {
     gs.bootPull();
   } catch (e) { console.error('  云同步初始化失败：' + (e && e.message)); }
 });
+}
+
+/* 账号库云同步先行：容器重建后先把账号恢复回来，再对外提供服务（25s 超时兜底） */
+(function bootDataSync() {
+  let done = false;
+  const go = () => { if (done) return; done = true; startServer(); };
+  setTimeout(go, 25000);
+  let ds = null;
+  try { ds = require('./lib/datasync'); } catch (e) { console.error('  账号同步模块加载失败：' + (e && e.message)); go(); return; }
+  ds.bootInit().then((r) => {
+    console.log('  账号同步 : ' + (r && r.ok
+      ? (r.empty ? '云端为空，已上传当前账号库' : '已从云端恢复账号 ' + (r.users || 0) + ' 个')
+      : '未启用/失败（' + ((r && r.message) || '') + '）'));
+  }).catch((e) => console.error('  账号同步异常：' + (e && e.message))).then(go);
+})();
 
 if (IDLE_MS > 0) {
   setInterval(() => { if (rooms.size === 0) { console.log('无活动会话，退出。'); process.exit(0); } }, IDLE_MS);
