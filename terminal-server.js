@@ -319,6 +319,13 @@ server.listen(PORT, HOST, () => {
   console.log('  模型服务 : ' + (modelReady ? '已配置 ' + process.env.AYCHO_MODEL_BASE_URL + ' / ' + (process.env.AYCHO_MODEL_NAME || '') : '未配置 → /api/chat 会提示缺少 Key'));
   console.log('  邮件服务 : ' + (mailReady ? '已配置 SMTP（验证码真实发送）' : '未配置 SMTP → 验证码输出到本控制台'));
   if (!WebSocketServer) console.error('  警告：缺少 ws 模块，请执行 npm install');
+  /* 工作区云同步：容器重建后自动从 GitHub 恢复文件（未配置则自动跳过） */
+  try {
+    const gs = require('./lib/gitsync');
+    const st = gs.status();
+    console.log('  云同步   : ' + (st.enabled ? st.repo + '@' + st.branch + (st.prefix ? '/' + st.prefix : '') + '（自动 pull + 改动自动 push）' : '未启用（未配置 AYCHO_WS_REPO / AYCHO_WS_TOKEN）'));
+    gs.bootPull();
+  } catch (e) { console.error('  云同步初始化失败：' + (e && e.message)); }
 });
 
 if (IDLE_MS > 0) {
