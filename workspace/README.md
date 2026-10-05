@@ -1,4 +1,7 @@
-# AYCHO 云端工作区
+# AYCHO Web
 
-这是服务端真实落盘目录（server/data/workspace）。
-IDE 面板的保存 = 真写文件；项目文件面板的增删改 = 真改磁盘。
+The agent can help you get everything done.
+
+- 零构建纯原生，双击 index.html 即可运行
+- 左侧会话栏 / 主页 / 对话页 / 右侧五面板 / 设置中心
+- 零构建纯原生，功能真实可用
