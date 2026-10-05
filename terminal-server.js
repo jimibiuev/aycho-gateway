@@ -279,6 +279,32 @@ if (WebSocketServer) {
   });
 }
 
+/* ------------------------------------------------------------------ 运行时自举：IDE Java 编译器
+ * 镜像未内置 JDK 时（如平台未重建镜像），启动后后台静默安装，保证 /api/run 的 javac/java 真实可用。
+ * 幂等：已具备 javac、非 root、非 Debian 系时直接跳过，不影响启动速度。 */
+function ensureJavaRuntime() {
+  let exec, spawn;
+  try {
+    const cp = require('child_process');
+    exec = cp.exec; spawn = cp.spawn;
+  } catch (_) { return; }
+  try {
+    exec('command -v javac', (err, stdout) => {
+      if (!err && String(stdout || '').trim()) return;
+      if (typeof process.getuid === 'function' && process.getuid() !== 0) return;
+      if (!fs.existsSync('/usr/bin/apt-get')) return;
+      let log = null;
+      try { log = fs.openSync('/tmp/aycho-jdk-bootstrap.log', 'a'); } catch (_) { return; }
+      const child = spawn('/bin/bash', ['-lc',
+        'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openjdk-17-jdk-headless'
+      ], { detached: true, stdio: ['ignore', log, log] });
+      child.unref();
+      console.log('  运行时就绪 : 后台安装 JDK17（javac/java 约 1~3 分钟后可用）');
+    });
+  } catch (e) { /* 缺失时静默，IDE 仍可运行 node/python/C/C++ */ }
+}
+ensureJavaRuntime();
+
 /* ------------------------------------------------------------------ 启动 */
 server.listen(PORT, HOST, () => {
   const modelReady = !!(process.env.AYCHO_MODEL_BASE_URL && process.env.AYCHO_MODEL_API_KEY);
