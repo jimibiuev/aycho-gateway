@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: aycho-gateway
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # ↓ 全部在 Render 控制台填，不写进仓库（避免密钥外泄）
+      - key: AYCHO_MODEL_BASE_URL
+        sync: false
+      - key: AYCHO_MODEL_API_KEY
+        sync: false
+      - key: AYCHO_MODEL_NAME
+        sync: false
+      - key: AYCHO_SMTP_HOST
+        sync: false
+      - key: AYCHO_SMTP_PORT
+        sync: false
+      - key: AYCHO_SMTP_USER
+        sync: false
+      - key: AYCHO_SMTP_PASS
+        sync: false
+      - key: AYCHO_MAIL_FROM
+        sync: false
+      - key: AYCHO_MAIL_FROM_NAME
+        sync: false
+      - key: AYCHO_CORS
+        value: "*"
+      - key: AYCHO_SHARE_BASE
+        sync: false

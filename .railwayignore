@@ -1,0 +1,7 @@
+.git
+node_modules
+.env
+outbox
+*.log
+test-*
+fixtures

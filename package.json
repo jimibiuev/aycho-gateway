@@ -1,0 +1,19 @@
+{
+  "name": "aycho-terminal-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AYCHO Web 右侧工作台终端面板的真实后端（node-pty + ws），并顺带静态托管前端",
+  "main": "terminal-server.js",
+  "scripts": {
+    "start": "node terminal-server.js",
+    "start:all": "node terminal-server.js --host 0.0.0.0 --port 8787",
+    "dev": "node terminal-server.js --port 8787 --cwd ../"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "ws": "^8.22.0"
+  }
+}
