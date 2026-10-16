@@ -1,0 +1,63 @@
+# AYCHO 邮箱验证码中继：Render 封锁 465/587 出站时，由 GitHub runner 代投
+# 优先走仓库 SMTP Secrets（AYCHO_SMTP_*），否则回退 GitHub 自带 SMTP（零配置，用 GITHUB_TOKEN）
+name: AYCHO Mail
+on:
+  repository_dispatch:
+    types: [aycho-mail]
+  workflow_dispatch:
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Send via SMTP
+        env:
+          GHA_RID: ${{ github.event.client_payload.rid }}
+          GHA_TO: ${{ github.event.client_payload.to }}
+          GHA_SUBJECT: ${{ github.event.client_payload.subject }}
+          GHA_FROM: ${{ github.event.client_payload.from }}
+          GHA_FROM_NAME: ${{ github.event.client_payload.from_name }}
+          GHA_TEXT_B64: ${{ github.event.client_payload.text_b64 }}
+          GHA_HTML_B64: ${{ github.event.client_payload.html_b64 }}
+          S_HOST: ${{ secrets.AYCHO_SMTP_HOST }}
+          S_PORT: ${{ secrets.AYCHO_SMTP_PORT }}
+          S_USER: ${{ secrets.AYCHO_SMTP_USER }}
+          S_PASS: ${{ secrets.AYCHO_SMTP_PASS }}
+          GH_OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          export PORT="${S_PORT:-465}"
+          # 优先仓库 SMTP Secrets；缺失则回退 GitHub 自带 SMTP（github 域收件人可收，QQ 等外部域也能走 587）
+          if [ -n "${S_HOST:-}" ] && [ -n "${S_USER:-}" ] && [ -n "${S_PASS:-}" ]; then
+            export HOST="$S_HOST"; USER="$S_USER"; PASS="$S_PASS"; MODE="repo-smtp"
+          else
+            export HOST="smtp.github.com"; USER="${GH_OWNER}"; PASS="$GH_TOKEN"; PORT="587"; MODE="gh-smtp"
+            echo "::notice::未配 AYCHO_SMTP_* Secrets，回退 GitHub 自带 SMTP（收件人需可达）"
+          fi
+          python3 - <<'PY'
+import os, smtplib, base64
+host = os.environ["HOST"]; port = int(os.environ.get("PORT", "465"))
+user = os.environ["USER"]; pw = os.environ["PASS"]
+to = os.environ.get("GHA_TO", "")
+subj = os.environ.get("GHA_SUBJECT") or "AYCHO"
+t64 = os.environ.get("GHA_TEXT_B64") or ""
+text = base64.b64decode(t64).decode("utf-8", "replace") if t64 else (to + " " + subj)
+frm = os.environ.get("GHA_FROM") or user
+fn = os.environ.get("GHA_FROM_NAME") or "AYCHO"
+from_ = fn + " <" + frm + ">"
+from email.message import EmailMessage
+m = EmailMessage()
+m["From"] = from_; m["To"] = to; m["Subject"] = subj
+m.set_content(text)
+if int(os.environ.get("PORT", "465")) == 465:
+    s = smtplib.SMTP_SSL(host, port, timeout=30)
+else:
+    s = smtplib.SMTP(host, port, timeout=30)
+    s.starttls()
+s.login(user, pw)
+s.sendmail(frm, [to], m.as_string())
+s.quit()
+print("[AYCHO Mail] 发信成功(" + os.environ.get("MODE", "?") + ") →", to, "(rid=" + os.environ.get("GHA_RID", "") + ")")
+PY
